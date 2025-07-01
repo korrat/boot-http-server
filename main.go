@@ -90,7 +90,7 @@ func (cfg *apiConfig) handlerUsersCreate(res http.ResponseWriter, req *http.Requ
 
 }
 
-func (cfg *apiConfig) handlerChirpsCreate(res http.ResponseWriter, req *http.Request) {
+func (cfg *apiConfig) handlerChirpCreate(res http.ResponseWriter, req *http.Request) {
 	var params struct {
 		Body   string    `json:"body"`
 		UserId uuid.UUID `json:"user_id"`
@@ -137,10 +137,39 @@ func (cfg *apiConfig) handlerChirpsCreate(res http.ResponseWriter, req *http.Req
 	}
 }
 
+func (cfg *apiConfig) handlerChirpGet(res http.ResponseWriter, req *http.Request) {
+	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
+	if err != nil {
+		log.Printf("Invalid chirp ID: %v", err)
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	chirp, err := cfg.db.GetChirp(req.Context(), chirpID)
+	if err == sql.ErrNoRows {
+		res.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if err != nil {
+		log.Printf("Error loading chirps: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	res.Header().Set("Content-Type", "application/json")
+	res.WriteHeader(http.StatusOK)
+	enc := json.NewEncoder(res)
+	if err := enc.Encode(chirpFromDB(chirp)); err != nil {
+		log.Printf("Error encoding response: %s", err)
+		return
+	}
+}
+
 func (cfg *apiConfig) handlerChirpsGet(res http.ResponseWriter, req *http.Request) {
 	chirps, err := cfg.db.GetChirps(req.Context())
 	if err != nil {
-		log.Printf("Error creating chirp: %v", err)
+		log.Printf("Error loading chirps: %v", err)
 		res.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -189,11 +218,12 @@ func main() {
 
 	mux.Handle("GET /admin/metrics", apiCfg.handlerMetricsGet())
 	mux.Handle("GET /api/chirps", http.HandlerFunc(apiCfg.handlerChirpsGet))
+	mux.Handle("GET /api/chirps/{chirpID}", http.HandlerFunc(apiCfg.handlerChirpGet))
 	mux.Handle("GET /api/healthz", http.HandlerFunc(readiness))
 
 	mux.Handle("POST /admin/reset", apiCfg.handlerMetricsReset())
 	mux.Handle("POST /api/users", http.HandlerFunc(apiCfg.handlerUsersCreate))
-	mux.Handle("POST /api/chirps", http.HandlerFunc(apiCfg.handlerChirpsCreate))
+	mux.Handle("POST /api/chirps", http.HandlerFunc(apiCfg.handlerChirpCreate))
 
 	srv := http.Server{Addr: ":8080", Handler: mux}
 	log.Println("starting chirpy server on", srv.Addr)
