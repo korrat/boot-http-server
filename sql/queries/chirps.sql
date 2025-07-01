@@ -6,6 +6,12 @@ VALUES
 RETURNING
     *;
 
+-- name: DeleteChirp :exec
+DELETE FROM
+    chirps
+WHERE
+    id = $1;
+
 -- name: GetChirp :one
 SELECT
     *

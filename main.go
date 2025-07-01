@@ -101,7 +101,7 @@ func (cfg *apiConfig) handlerChirpGet(res http.ResponseWriter, req *http.Request
 	}
 
 	if err != nil {
-		log.Printf("Error loading chirps: %v", err)
+		log.Printf("Error loading chirp: %v", err)
 		res.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -113,6 +113,46 @@ func (cfg *apiConfig) handlerChirpGet(res http.ResponseWriter, req *http.Request
 		log.Printf("Error encoding response: %s", err)
 		return
 	}
+}
+
+func (cfg *apiConfig) handlerChirpDelete(res http.ResponseWriter, req *http.Request) {
+	token, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		res.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+	if err != nil {
+		res.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
+	if err != nil {
+		log.Printf("Invalid chirp ID: %v", err)
+		res.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	chirp, err := cfg.db.GetChirp(req.Context(), chirpID)
+	if err == sql.ErrNoRows {
+		res.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	if chirp.UserID != userID {
+		res.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	if err := cfg.db.DeleteChirp(req.Context(), chirpID); err != nil {
+		log.Printf("Error deleting chirp: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	res.WriteHeader(http.StatusNoContent)
 }
 
 func (cfg *apiConfig) handlerChirpsGet(res http.ResponseWriter, req *http.Request) {
@@ -439,6 +479,8 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
+
+	mux.Handle("DELETE /api/chirps/{chirpID}", http.HandlerFunc(apiCfg.handlerChirpDelete))
 
 	mux.Handle("GET /admin/metrics", apiCfg.handlerMetricsGet())
 	mux.Handle("GET /api/chirps", http.HandlerFunc(apiCfg.handlerChirpsGet))
