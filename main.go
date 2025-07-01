@@ -13,7 +13,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 
+	"github.com/korrat/boot-http-server/internal/auth"
 	"github.com/korrat/boot-http-server/internal/database"
 )
 
@@ -22,7 +24,85 @@ type apiConfig struct {
 
 	fileserverHits atomic.Int32
 
-	platform string
+	platform    string
+	tokenSecret string
+}
+
+func (cfg *apiConfig) handlerLogin(res http.ResponseWriter, req *http.Request) {
+	var params struct {
+		Email    string
+		Password string
+		Expiry   int `json:"expires_in_seconds"`
+	}
+
+	dec := json.NewDecoder(req.Body)
+	if err := dec.Decode(&params); err != nil {
+		log.Printf("Error decoding parameters: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	user, err := cfg.db.GetUserByEmail(req.Context(), params.Email)
+	if err == sql.ErrNoRows {
+		res.WriteHeader(http.StatusUnauthorized)
+		res.Write([]byte("incorrect email or password"))
+		return
+	}
+
+	if err != nil {
+		log.Printf("Error fetching user: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if !user.HashedPassword.Valid {
+		res.WriteHeader(http.StatusUnauthorized)
+		res.Write([]byte("incorrect email or password"))
+		return
+	}
+
+	if err := auth.CheckPasswordHash(params.Password, user.HashedPassword.String); err == bcrypt.ErrMismatchedHashAndPassword {
+		res.WriteHeader(http.StatusUnauthorized)
+		res.Write([]byte("incorrect email or password"))
+		return
+	} else if err != nil {
+		log.Printf("Error hashing password: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if params.Expiry == 0 || 3600 < params.Expiry {
+		// Default & clamp expiry to one hour
+		params.Expiry = 3600
+	}
+
+	token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, time.Duration(params.Expiry)*time.Second)
+	if err != nil {
+		log.Printf("Error creating JWT token: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	res.Header().Set("Content-Type", "application/json")
+	res.WriteHeader(http.StatusOK)
+	enc := json.NewEncoder(res)
+	if err := enc.Encode(struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+		Token     string    `json:"token"`
+	}{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+		Token:     token,
+	}); err != nil {
+		log.Printf("Error encoding response: %s", err)
+		return
+	}
+
 }
 
 func (cfg *apiConfig) handlerMetricsGet() http.Handler {
@@ -54,8 +134,12 @@ func (cfg *apiConfig) handlerMetricsReset() http.Handler {
 	})
 }
 
-func (cfg *apiConfig) handlerUsersCreate(res http.ResponseWriter, req *http.Request) {
-	var params struct{ Email string }
+func (cfg *apiConfig) handlerUserCreate(res http.ResponseWriter, req *http.Request) {
+	var params struct {
+		Email    string
+		Password string
+	}
+
 	dec := json.NewDecoder(req.Body)
 	if err := dec.Decode(&params); err != nil {
 		log.Printf("Error decoding parameters: %v", err)
@@ -63,7 +147,17 @@ func (cfg *apiConfig) handlerUsersCreate(res http.ResponseWriter, req *http.Requ
 		return
 	}
 
-	user, err := cfg.db.CreateUser(req.Context(), params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("Error hashing password: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	user, err := cfg.db.CreateUser(req.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: sql.NullString{String: hashedPassword, Valid: true},
+	})
 	if err != nil {
 		log.Printf("Error creating user: %v", err)
 		res.WriteHeader(http.StatusInternalServerError)
@@ -73,17 +167,7 @@ func (cfg *apiConfig) handlerUsersCreate(res http.ResponseWriter, req *http.Requ
 	res.Header().Set("Content-Type", "application/json")
 	res.WriteHeader(http.StatusCreated)
 	enc := json.NewEncoder(res)
-	if err := enc.Encode(struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
-	}{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
-	}); err != nil {
+	if err := enc.Encode(userFromDB(user)); err != nil {
 		log.Printf("Error encoding response: %s", err)
 		return
 	}
@@ -91,9 +175,20 @@ func (cfg *apiConfig) handlerUsersCreate(res http.ResponseWriter, req *http.Requ
 }
 
 func (cfg *apiConfig) handlerChirpCreate(res http.ResponseWriter, req *http.Request) {
+	token, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		res.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+	if err != nil {
+		res.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	var params struct {
-		Body   string    `json:"body"`
-		UserId uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 	dec := json.NewDecoder(req.Body)
 	if err := dec.Decode(&params); err != nil {
@@ -120,7 +215,7 @@ func (cfg *apiConfig) handlerChirpCreate(res http.ResponseWriter, req *http.Requ
 
 	chirp, err := cfg.db.CreateChirp(req.Context(), database.CreateChirpParams{
 		Body:   cleaned,
-		UserID: params.UserId,
+		UserID: userID,
 	})
 	if err != nil {
 		log.Printf("Error creating chirp: %v", err)
@@ -211,8 +306,14 @@ func main() {
 	}
 
 	platform := os.Getenv("PLATFORM")
+	tokenSecret := os.Getenv("TOKEN_SECRET")
 
-	apiCfg := apiConfig{db: database.New(db), platform: platform}
+	apiCfg := apiConfig{
+		db: database.New(db),
+
+		platform:    platform,
+		tokenSecret: tokenSecret,
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 
@@ -222,7 +323,8 @@ func main() {
 	mux.Handle("GET /api/healthz", http.HandlerFunc(readiness))
 
 	mux.Handle("POST /admin/reset", apiCfg.handlerMetricsReset())
-	mux.Handle("POST /api/users", http.HandlerFunc(apiCfg.handlerUsersCreate))
+	mux.Handle("POST /api/login", http.HandlerFunc(apiCfg.handlerLogin))
+	mux.Handle("POST /api/users", http.HandlerFunc(apiCfg.handlerUserCreate))
 	mux.Handle("POST /api/chirps", http.HandlerFunc(apiCfg.handlerChirpCreate))
 
 	srv := http.Server{Addr: ":8080", Handler: mux}
