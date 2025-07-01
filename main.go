@@ -353,6 +353,59 @@ func (cfg *apiConfig) handlerUserCreate(res http.ResponseWriter, req *http.Reque
 
 }
 
+func (cfg *apiConfig) handlerUserUpdate(res http.ResponseWriter, req *http.Request) {
+	token, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		res.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+	if err != nil {
+		res.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	var params struct {
+		Email    string
+		Password string
+	}
+
+	dec := json.NewDecoder(req.Body)
+	if err := dec.Decode(&params); err != nil {
+		log.Printf("Error decoding parameters: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("Error hashing password: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	user, err := cfg.db.UpdateUser(req.Context(), database.UpdateUserParams{
+		Email:          params.Email,
+		HashedPassword: sql.NullString{String: hashedPassword, Valid: true},
+		ID:             userID,
+	})
+	if err != nil {
+		log.Printf("Error updating user: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	res.Header().Set("Content-Type", "application/json")
+	res.WriteHeader(http.StatusOK)
+	enc := json.NewEncoder(res)
+	if err := enc.Encode(userFromDB(user)); err != nil {
+		log.Printf("Error encoding response: %s", err)
+		return
+	}
+
+}
+
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits.Add(1)
@@ -398,6 +451,8 @@ func main() {
 	mux.Handle("POST /api/chirps", http.HandlerFunc(apiCfg.handlerChirpCreate))
 	mux.Handle("POST /api/refresh", http.HandlerFunc(apiCfg.handlerRefresh))
 	mux.Handle("POST /api/revoke", http.HandlerFunc(apiCfg.handlerRevoke))
+
+	mux.Handle("PUT /api/users", http.HandlerFunc(apiCfg.handlerUserUpdate))
 
 	srv := http.Server{Addr: ":8080", Handler: mux}
 	log.Println("starting chirpy server on", srv.Addr)
