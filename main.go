@@ -102,7 +102,7 @@ func (cfg *apiConfig) handlerChirpsCreate(res http.ResponseWriter, req *http.Req
 		return
 	}
 
-	cleaned, err := validateChirp(params.Body)
+	cleaned, err := validateChirpBody(params.Body)
 	if err != nil {
 		res.Header().Set("Content-Type", "application/json")
 		res.WriteHeader(http.StatusBadRequest)
@@ -131,19 +131,29 @@ func (cfg *apiConfig) handlerChirpsCreate(res http.ResponseWriter, req *http.Req
 	res.Header().Set("Content-Type", "application/json")
 	res.WriteHeader(http.StatusCreated)
 	enc := json.NewEncoder(res)
-	if err := enc.Encode(struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Body      string    `json:"body"`
-		UserID    uuid.UUID `json:"user_id"`
-	}{
-		ID:        chirp.ID,
-		CreatedAt: chirp.CreatedAt,
-		UpdatedAt: chirp.UpdatedAt,
-		Body:      chirp.Body,
-		UserID:    chirp.UserID,
-	}); err != nil {
+	if err := enc.Encode(chirpFromDB(chirp)); err != nil {
+		log.Printf("Error encoding response: %s", err)
+		return
+	}
+}
+
+func (cfg *apiConfig) handlerChirpsGet(res http.ResponseWriter, req *http.Request) {
+	chirps, err := cfg.db.GetChirps(req.Context())
+	if err != nil {
+		log.Printf("Error creating chirp: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	var data []chirp
+	for _, c := range chirps {
+		data = append(data, chirpFromDB(c))
+	}
+
+	res.Header().Set("Content-Type", "application/json")
+	res.WriteHeader(http.StatusOK)
+	enc := json.NewEncoder(res)
+	if err := enc.Encode(data); err != nil {
 		log.Printf("Error encoding response: %s", err)
 		return
 	}
@@ -178,6 +188,7 @@ func main() {
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 
 	mux.Handle("GET /admin/metrics", apiCfg.handlerMetricsGet())
+	mux.Handle("GET /api/chirps", http.HandlerFunc(apiCfg.handlerChirpsGet))
 	mux.Handle("GET /api/healthz", http.HandlerFunc(readiness))
 
 	mux.Handle("POST /admin/reset", apiCfg.handlerMetricsReset())
