@@ -157,7 +157,19 @@ func (cfg *apiConfig) handlerChirpDelete(res http.ResponseWriter, req *http.Requ
 }
 
 func (cfg *apiConfig) handlerChirpsGet(res http.ResponseWriter, req *http.Request) {
-	chirps, err := cfg.db.GetChirps(req.Context())
+	var chirps []database.Chirp
+	var err error
+	if req.URL.Query().Has("author_id") {
+		id, err := uuid.Parse(req.URL.Query().Get("author_id"))
+		if err != nil {
+			res.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		chirps, err = cfg.db.GetChirpsBy(req.Context(), id)
+	} else {
+		chirps, err = cfg.db.GetChirps(req.Context())
+	}
 	if err != nil {
 		log.Printf("Error loading chirps: %v", err)
 		res.WriteHeader(http.StatusInternalServerError)
