@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -157,6 +158,21 @@ func (cfg *apiConfig) handlerChirpDelete(res http.ResponseWriter, req *http.Requ
 }
 
 func (cfg *apiConfig) handlerChirpsGet(res http.ResponseWriter, req *http.Request) {
+	sort_desc := false
+	if req.URL.Query().Has("sort") {
+		switch req.URL.Query().Get("sort") {
+		case "asc":
+			break
+		case "desc":
+			sort_desc = true
+
+		default:
+			res.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+	}
+
 	var chirps []database.Chirp
 	var err error
 	if req.URL.Query().Has("author_id") {
@@ -179,6 +195,10 @@ func (cfg *apiConfig) handlerChirpsGet(res http.ResponseWriter, req *http.Reques
 	var data []chirp
 	for _, c := range chirps {
 		data = append(data, chirpFromDB(c))
+	}
+
+	if sort_desc {
+		slices.Reverse(data)
 	}
 
 	res.Header().Set("Content-Type", "application/json")
