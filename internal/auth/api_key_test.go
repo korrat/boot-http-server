@@ -7,7 +7,7 @@ import (
 	"github.com/korrat/boot-http-server/internal/auth"
 )
 
-func TestGetBearerToken(t *testing.T) {
+func TestGetAPIKey(t *testing.T) {
 	tests := []struct {
 		name string // description of this test case
 		// Named input parameters for target function.
@@ -36,20 +36,20 @@ func TestGetBearerToken(t *testing.T) {
 		},
 		{
 			name:    "Correctly formatted header value",
-			headers: http.Header{"Authorization": []string{"Bearer some value"}},
+			headers: http.Header{"Authorization": []string{"ApiKey some value"}},
 
 			want: "some value",
 		},
 		{
 			name:    "Correct empty token",
-			headers: http.Header{"Authorization": []string{"Bearer "}},
+			headers: http.Header{"Authorization": []string{"ApiKey "}},
 
 			want: "",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, gotErr := auth.GetBearerToken(tt.headers)
+			got, gotErr := auth.GetAPIKey(tt.headers)
 			if gotErr != nil {
 				if !tt.wantErr {
 					t.Errorf("GetBearerToken() failed: %v", gotErr)

@@ -25,6 +25,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 
 	platform    string
+	polkaKey    string
 	tokenSecret string
 }
 
@@ -247,21 +248,7 @@ func (cfg *apiConfig) handlerLogin(res http.ResponseWriter, req *http.Request) {
 	res.Header().Set("Content-Type", "application/json")
 	res.WriteHeader(http.StatusOK)
 	enc := json.NewEncoder(res)
-	if err := enc.Encode(struct {
-		ID           uuid.UUID `json:"id"`
-		CreatedAt    time.Time `json:"created_at"`
-		UpdatedAt    time.Time `json:"updated_at"`
-		Email        string    `json:"email"`
-		Token        string    `json:"token"`
-		RefreshToken string    `json:"refresh_token"`
-	}{
-		ID:           user.ID,
-		CreatedAt:    user.CreatedAt,
-		UpdatedAt:    user.UpdatedAt,
-		Email:        user.Email,
-		Token:        token,
-		RefreshToken: refreshToken,
-	}); err != nil {
+	if err := enc.Encode(loginFromDB(user, token, refreshToken)); err != nil {
 		log.Printf("Error encoding response: %s", err)
 		return
 	}
@@ -443,7 +430,51 @@ func (cfg *apiConfig) handlerUserUpdate(res http.ResponseWriter, req *http.Reque
 		log.Printf("Error encoding response: %s", err)
 		return
 	}
+}
 
+func (cfg *apiConfig) handlerWebhooks(res http.ResponseWriter, req *http.Request) {
+	key, err := auth.GetAPIKey(req.Header)
+	if err != nil || key != cfg.polkaKey {
+		res.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	var params struct {
+		Event string
+		Data  struct {
+			UserID uuid.UUID `json:"user_id"`
+		}
+	}
+
+	dec := json.NewDecoder(req.Body)
+	if err := dec.Decode(&params); err != nil {
+		log.Printf("Error decoding parameters: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		res.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	numRows, err := cfg.db.UpgradeUserToRed(req.Context(), params.Data.UserID)
+	if err != nil {
+		log.Printf("Error upgrading user to Chirpy Red: %v", err)
+		res.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	switch numRows {
+	case 0:
+		// user not found
+		res.WriteHeader(http.StatusNotFound)
+	case 1:
+		res.WriteHeader(http.StatusNoContent)
+
+	default:
+		log.Panicf("unexpected upgrade result, expected at most one affected row, got %v", numRows)
+	}
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -470,11 +501,13 @@ func main() {
 
 	platform := os.Getenv("PLATFORM")
 	tokenSecret := os.Getenv("TOKEN_SECRET")
+	polkaKey := os.Getenv("POLKA_KEY")
 
 	apiCfg := apiConfig{
 		db: database.New(db),
 
 		platform:    platform,
+		polkaKey:    polkaKey,
 		tokenSecret: tokenSecret,
 	}
 	mux := http.NewServeMux()
@@ -491,6 +524,7 @@ func main() {
 	mux.Handle("POST /api/login", http.HandlerFunc(apiCfg.handlerLogin))
 	mux.Handle("POST /api/users", http.HandlerFunc(apiCfg.handlerUserCreate))
 	mux.Handle("POST /api/chirps", http.HandlerFunc(apiCfg.handlerChirpCreate))
+	mux.Handle("POST /api/polka/webhooks", http.HandlerFunc(apiCfg.handlerWebhooks))
 	mux.Handle("POST /api/refresh", http.HandlerFunc(apiCfg.handlerRefresh))
 	mux.Handle("POST /api/revoke", http.HandlerFunc(apiCfg.handlerRevoke))
 
